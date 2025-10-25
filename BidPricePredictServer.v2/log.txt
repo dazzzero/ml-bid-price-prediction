@@ -1,0 +1,2 @@
+ * Serving Flask app 'BidPricePredictServer.v2'
+ * Debug mode: off
