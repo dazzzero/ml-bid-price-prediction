@@ -16,7 +16,7 @@ def analyze_data_simple():
     print("🔍 간단한 데이터 품질 분석 시작...")
     
     # 데이터 파일 로드
-    data_file = 'data/sample_prediction_data.csv'
+    data_file = 'data/gdns/result_data_gdns_17.csv'
     print(f"📁 데이터 파일 로드: {data_file}")
     
     try:
@@ -189,7 +189,7 @@ def main():
         improved_data = suggest_quick_improvements(data.copy())
         
         # 개선된 데이터 저장
-        output_file = 'data/bid_result_quick_improved.csv'
+        output_file = 'data/gdns/result_data_gdns_17_quick_improved.csv'
         improved_data.to_csv(output_file, index=False, encoding='utf-8')
         print(f"\n💾 개선된 데이터 저장: {output_file}")
         
