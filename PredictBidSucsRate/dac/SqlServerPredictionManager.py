@@ -12,9 +12,10 @@ from SqlServerManager import SqlServerManager
 class SqlServerPredictionManager:
     """SQL Server용 예측 결과 저장 및 관리 클래스"""
     
-    def __init__(self, host, port, database, username, password):
+    def __init__(self, host, port, database, username, password, table_name='ML_C'):
         self.db_manager = SqlServerManager.get_instance()
         self.connection = self.db_manager.connect(host, port, database, username, password)
+        self.table_name = table_name
         
         if not self.connection:
             raise Exception("SQL Server 연결에 실패했습니다.")
@@ -23,11 +24,11 @@ class SqlServerPredictionManager:
         self.create_table_if_not_exists()
     
     def create_table_if_not_exists(self):
-        """ML_C 테이블이 없으면 생성"""
+        """테이블이 없으면 생성"""
         try:
-            create_table_sql = """
-            IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='ML_C' AND xtype='U')
-            CREATE TABLE ML_C (
+            create_table_sql = f"""
+            IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{self.table_name}' AND xtype='U')
+            CREATE TABLE {self.table_name} (
                 입찰번호 VARCHAR(50) NOT NULL,
                 입찰차수 VARCHAR(10) NOT NULL,
                 기초금액률 DECIMAL(18, 9),
@@ -59,7 +60,7 @@ class SqlServerPredictionManager:
             """
             
             self.connection.execute_non_query(create_table_sql)
-            print("✅ ML_C 테이블 생성/확인 완료")
+            print(f"✅ {self.table_name} 테이블 생성/확인 완료")
             
         except Exception as e:
             print(f"❌ 테이블 생성 실패: {e}")
@@ -108,8 +109,8 @@ class SqlServerPredictionManager:
                     
                     if insert_mode == "REPLACE":
                         # MERGE 문 사용 (UPSERT)
-                        query = """
-                        MERGE ML_C AS target
+                        query = f"""
+                        MERGE {self.table_name} AS target
                         USING (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)) 
                         AS source (입찰번호, 입찰차수, 기초금액률, 낙찰하한률, 기초금액, 순공사원가, 간접비, A계산여부, 
                                   순공사원가적용여부, 면허제한코드, 공고기관코드, 주공종명, 공고기관명, 공고기관점수,
@@ -156,7 +157,7 @@ class SqlServerPredictionManager:
                         """
                         
                         # 기존 데이터 존재 여부 확인
-                        check_query = "SELECT COUNT(*) FROM ML_C WHERE 입찰번호 = ? AND 입찰차수 = ?"
+                        check_query = f"SELECT COUNT(*) FROM {self.table_name} WHERE 입찰번호 = ? AND 입찰차수 = ?"
                         existing = self.connection.execute_query(check_query, (str(row.get('입찰번호', '')), str(row.get('입찰차수', ''))))
                         if existing is not None and len(existing) > 0 and existing.iloc[0, 0] > 0:
                             updated_count += 1
@@ -165,9 +166,9 @@ class SqlServerPredictionManager:
                     
                     elif insert_mode == "IGNORE":
                         # INSERT 시 중복 무시
-                        query = """
-                        IF NOT EXISTS (SELECT 1 FROM ML_C WHERE 입찰번호 = ? AND 입찰차수 = ?)
-                        INSERT INTO ML_C (입찰번호, 입찰차수, 기초금액률, 낙찰하한률, 기초금액, 순공사원가, 간접비, A계산여부,
+                        query = f"""
+                        IF NOT EXISTS (SELECT 1 FROM {self.table_name} WHERE 입찰번호 = ? AND 입찰차수 = ?)
+                        INSERT INTO {self.table_name} (입찰번호, 입찰차수, 기초금액률, 낙찰하한률, 기초금액, 순공사원가, 간접비, A계산여부,
                                         순공사원가적용여부, 면허제한코드, 공고기관코드, 주공종명, 공고기관명, 공고기관점수,
                                         공사지역, 공사지역점수, 키워드, 키워드점수, 공고일자, 개찰일시, 예측_URL,
                                         업체투찰률_예측, 예가투찰률_예측, 참여업체수_예측, 예측일시)
@@ -177,8 +178,8 @@ class SqlServerPredictionManager:
                         saved_count += 1
                     
                     else:  # INSERT
-                        query = """
-                        INSERT INTO ML_C (입찰번호, 입찰차수, 기초금액률, 낙찰하한률, 기초금액, 순공사원가, 간접비, A계산여부,
+                        query = f"""
+                        INSERT INTO {self.table_name} (입찰번호, 입찰차수, 기초금액률, 낙찰하한률, 기초금액, 순공사원가, 간접비, A계산여부,
                                         순공사원가적용여부, 면허제한코드, 공고기관코드, 주공종명, 공고기관명, 공고기관점수,
                                         공사지역, 공사지역점수, 키워드, 키워드점수, 공고일자, 개찰일시, 예측_URL,
                                         업체투찰률_예측, 예가투찰률_예측, 참여업체수_예측, 예측일시)
@@ -200,7 +201,7 @@ class SqlServerPredictionManager:
                         print(f"⚠️  행 {index} 저장 실패: {e}")
                         continue
             
-            print(f"✅ SQL Server 저장 완료:")
+            print(f"✅ SQL Server 저장 완료 ({self.table_name}):")
             print(f"   - 새로 저장: {saved_count}건")
             if insert_mode == "REPLACE":
                 print(f"   - 업데이트: {updated_count}건")
@@ -287,8 +288,8 @@ class SqlServerPredictionManager:
     def get_prediction_results(self, limit=100, offset=0):
         """저장된 예측 결과 조회"""
         try:
-            query = """
-                SELECT * FROM ML_C 
+            query = f"""
+                SELECT * FROM {self.table_name} 
                 ORDER BY 예측일시 DESC 
                 OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
             """
@@ -301,7 +302,7 @@ class SqlServerPredictionManager:
     def get_prediction_count(self):
         """저장된 예측 결과 개수 조회"""
         try:
-            query = "SELECT COUNT(*) as count FROM ML_C"
+            query = f"SELECT COUNT(*) as count FROM {self.table_name}"
             result = self.connection.execute_query(query)
             return result.iloc[0, 0] if result is not None and len(result) > 0 else 0
         except Exception as e:
@@ -311,7 +312,7 @@ class SqlServerPredictionManager:
     def get_prediction_summary(self):
         """예측 결과 요약 통계 조회"""
         try:
-            query = """
+            query = f"""
                 SELECT 
                     COUNT(*) as 총건수,
                     AVG(업체투찰률_예측) as 평균업체투찰률,
@@ -319,7 +320,7 @@ class SqlServerPredictionManager:
                     AVG(참여업체수_예측) as 평균참여업체수,
                     MIN(예측일시) as 최초예측일시,
                     MAX(예측일시) as 최근예측일시
-                FROM ML_C
+                FROM {self.table_name}
             """
             result = self.connection.execute_query(query)
             if result is not None and len(result) > 0:
@@ -332,8 +333,8 @@ class SqlServerPredictionManager:
     def search_by_bid_number(self, bid_number):
         """입찰번호로 검색"""
         try:
-            query = """
-                SELECT * FROM ML_C 
+            query = f"""
+                SELECT * FROM {self.table_name} 
                 WHERE 입찰번호 LIKE ? 
                 ORDER BY 예측일시 DESC
             """
@@ -346,8 +347,8 @@ class SqlServerPredictionManager:
     def delete_old_predictions(self, days=30):
         """오래된 예측 결과 삭제"""
         try:
-            query = """
-                DELETE FROM ML_C 
+            query = f"""
+                DELETE FROM {self.table_name} 
                 WHERE 예측일시 < DATEADD(day, -?, GETDATE())
             """
             affected_rows = self.connection.execute_non_query(query, (days,))

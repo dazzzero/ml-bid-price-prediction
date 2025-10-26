@@ -147,7 +147,7 @@ class SampleDataPredictor():
     샘플 데이터 예측 클래스
     """
     
-    def __init__(self, use_sql_server=False, db_config=None):
+    def __init__(self, use_sql_server=False, db_config=None, table_name='ML_CST_RSLT_Y'):
         print("="*80)
         print("🔮 샘플 데이터 예측 시스템 초기화")
         print("="*80)
@@ -164,13 +164,14 @@ class SampleDataPredictor():
             
             if use_sql_server and db_config:
                 # SQL Server 사용
-                print("📊 SQL Server 연결 중...")
+                print(f"📊 SQL Server 연결 중... (테이블: {table_name})")
                 self.db_manager = SqlServerPredictionManager(
                     host=db_config['host'],
                     port=db_config['port'],
                     database=db_config['database'],
                     username=db_config['username'],
-                    password=db_config['password']
+                    password=db_config['password'],
+                    table_name=table_name
                 )
                 print("✅ SQL Server 데이터베이스 매니저 초기화 완료")
             else:
@@ -371,7 +372,8 @@ class SampleDataPredictor():
         result_df = dataset_x.copy()
         
         # 입찰번호와 입찰차수를 원본 데이터에서 가져와서 제일 앞에 추가
-        original_data = pd.read_csv(self.data_dir + "sample_prediction_data.csv")
+        # TODO : 아래는 예측대상파일
+        original_data = pd.read_csv(self.data_dir + "/cst/result_cst_rst_y.csv")
         original_data.columns = original_data.columns.str.strip()  # 컬럼명 공백 제거
         
         if '입찰번호' in original_data.columns:
@@ -509,7 +511,7 @@ class SampleDataPredictor():
 
 def main():
     """메인 실행 함수"""
-    data_file = "sample_prediction_data.csv"
+    data_file = "/cst/result_cst_rst_y.csv"
     
     # SQL Server 연결 설정
     db_config = {
@@ -525,8 +527,8 @@ def main():
         print("🎯 샘플 데이터 예측 시작")
         print("="*80)
         
-        # 예측기 생성 (SQL Server 사용)
-        predictor = SampleDataPredictor(use_sql_server=True, db_config=db_config)
+        # 예측기 생성 (SQL Server 사용, 테이블명 ML_CST_RSLT_Y)
+        predictor = SampleDataPredictor(use_sql_server=True, db_config=db_config, table_name='ML_CST_RSLT_Y')
         
         # 데이터 전처리
         processed_data = predictor.preprocess_data(data_file)
@@ -542,6 +544,7 @@ def main():
         print("🎉 예측 프로세스 완료!")
         print(f"📁 결과 파일: res/predict_result/{output_file}")
         print(f"🗄️  데이터베이스: SQL Server (192.168.0.218:1433/bips)")
+        print(f"📊 테이블명: ML_CST_RSLT_Y")
         print("="*80)
         
         # 예측 결과 요약 출력
