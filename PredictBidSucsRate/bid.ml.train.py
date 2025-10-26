@@ -10,6 +10,18 @@ Created on Mon Dec  2 10:14:33 2024
 - 3개의 MLPRegressor 모델을 훈련 (업체투찰률, 예가투찰률, 참여업체수 예측)
 - 훈련된 모델과 전처리 도구들을 파일로 저장
 - 텍스트 데이터를 TF-IDF 방식으로 벡터화하여 숫자로 변환
+
+입찰 유형별 지원:
+- 공사입찰: 순공사원가, 간접비, 주공종명 등 공사 전용 컬럼 포함
+- 구매입찰: 기본 컬럼들만 사용 (공사 전용 컬럼 제외)
+- 용역입찰: 기본 컬럼들만 사용 (공사 전용 컬럼 제외)
+
+사용법:
+- python bid.ml.train.py                    # 자동 감지 모드
+- python bid.ml.train.py cst       # 공사입찰 모드
+- python bid.ml.train.py mtrl          # 구매입찰 모드
+- python bid.ml.train.py gdns           # 용역입찰 모드
+- python bid.ml.train.py test              # 모델 성능 테스트
 """
 
 # ===== 필요한 라이브러리들 import =====
@@ -238,12 +250,19 @@ class BidLowerMarginRateTrain():
     1. 데이터 로드 → 2. 텍스트 벡터화 → 3. 데이터 정규화 → 4. 모델 훈련 → 5. 모델 저장
     """
     
-    def __init__(self):
+    def __init__(self, bid_type='auto'):
         """
         BidLowerMarginRateTrain 초기화 함수
         - 디렉토리 경로 설정
-        - 데이터 컬럼 정의
+        - 데이터 컬럼 정의 (입찰 유형별)
         - 텍스트 처리 도구들 초기화
+        
+        Args:
+            bid_type (str): 입찰 유형 ('cst', 'mtrl', 'gdns', 'auto')
+                - 'cst': 공사입찰 (기존 컬럼들 + 순공사원가, 간접비 등)
+                - 'mtrl': 구매입찰 (기본 컬럼들만)
+                - 'gdns': 용역입찰 (기본 컬럼들만)
+                - 'auto': 자동 감지 (데이터 로드 시 컬럼 존재 여부로 판단)
         """
         # 랜덤 번호 생성 (파일명에 사용)
         self.rnd_num = rnd.randint(100, 999)
@@ -257,59 +276,359 @@ class BidLowerMarginRateTrain():
         self.excel_file_nm = None  # 결과 엑셀 파일명 (나중에 설정)
         self.xlxs_dir = None  # 엑셀 파일 전체 경로 (나중에 설정) 
         
-       
-        # ===== 데이터 컬럼 정의 =====
-        # CSV 파일에서 읽어올 컬럼들의 이름 정의
-        self.cvs_columns = ['기초금액', '낙찰하한률', '참여업체수', 
-                            '낙찰금액', '업체투찰률', '예가투찰률', '투찰률오차', 
-                            '간접비', '순공사원가', '입찰번호', '입찰차수', 
-                            '예정금액', '낙찰하한가', 
-                            '면허제한코드','공고기관코드','주공종명', 
-                            '공고기관명', '공고기관점수',
-                            '공사지역', '공사지역점수',
-                            '키워드', '키워드점수']
+        # 입찰 유형 저장
+        self.bid_type = bid_type
         
-        # 각 컬럼의 데이터 타입 정의 (pandas가 올바르게 데이터를 읽기 위해)
-        self.cvs_columns_type = {
-                            '기초금액':'float64', '낙찰하한률':'float64', '참여업체수':'float64', 
-                            '낙찰금액':'int64', '업체투찰률':'float64', '예가투찰률':'float64', '투찰률오차':'float64', 
-                            '간접비':'int64', '순공사원가':'int64', '입찰번호':'str', '입찰차수':'int64', 
-                            '예정금액':'int64', '낙찰하한가':'int64',
-                            '면허제한코드':'str','공고기관코드':'str','주공종명':'str', 
-                            '공고기관명':'str', '공고기관점수':'float64',
-                            '공사지역':'str', '공사지역점수':'float64',
-                            '키워드':'str', '키워드점수':'float64'
-                            }
+        # ===== 입찰 유형별 컬럼 정의 =====
+        self._define_bid_type_columns()
+        
+        # ===== 텍스트 처리 도구들 초기화 =====
+        # 한국어 형태소 분석기 초기화 (새로 생성)
+        self.tokenizer = KiwiTokenizer(None)
+        self.tokenizer.loadDictonary('표준국어대사전.NNP.csv')  # 표준국어대사전을 로드하여 정확한 단어 인식
+        
+        # TF-IDF 벡터화기 초기화 (텍스트를 숫자로 변환하는 도구)
+        self.vectorizer = KiwiVectorizer()
         
         # ===== 결과 데이터 컬럼 정의 =====
         # 예측 결과를 저장할 엑셀 파일의 컬럼들 정의 (원본 데이터 + 예측 결과)
-        self.result_columns = ['입찰번호', '입찰차수', '기초금액', 
-                               '낙찰하한률', '참여업체수', '간접비', '순공사원가', 
-                               '면허제한코드', '공고기관코드',
-                               '공고기관명', '공고기관점수',
-                               '공사지역', '공사지역점수',                               
-                               '키워드', '키워드점수',
-                               '업체투찰률', '예가투찰률', '투찰률오차', 
-                               '예정금액', '낙찰하한가', '낙찰금액', 
-                               '업체투찰률예측', '예가투찰률예측', '참여업체수예측', '예정금액예측',
-                               '낙찰금액(업체투찰률) 예측', 'A값여부', '결과1', 
-                               '예정금액(예가투찰률) 예측', '예정금액*낙찰하한율', '결과2']
+        self.result_columns = self._get_result_columns()
         
-        # 결과 컬럼들의 데이터 타입 정의
-        self.result_columns_type = {
-                            '입찰번호':'str', '입찰차수':'int64','기초금액':'float64',
-                            '낙찰하한률':'float64', '참여업체수':'float64', '간접비':'int64', '순공사원가':'int64',  
-                            '면허제한코드':'float64', '공고기관코드':'float64',
-                            '공고기관명':'str', '공고기관점수':'float64',
-                            '공사지역':'str', '공사지역점수':'float64',                            
-                            '키워드':'str', '키워드점수':'float64',
-                            '업체투찰률':'float64', '예가투찰률':'float64', '투찰률오차':'float64', 
-                            '예정금액':'int64', '낙찰하한가':'int64', '낙찰금액':'int64', 
-                            '업체투찰률예측':'float64', '예가투찰률예측':'float64', '참여업체수예측':'float64', '예정금액예측':'int64',
-                            '낙찰금액(업체투찰률) 예측':'float64', 'A값여부':'str', '결과1':'str',
-                            '예정금액(예가투찰률) 예측':'float64', '예정금액*낙찰하한율':'float64', '결과2':'str'
-                            }
+        # 결과 컬럼들의 데이터 타입 정의 (동적으로 생성)
+        self.result_columns_type = self._get_result_column_types()
 
+    def _define_bid_type_columns(self):
+        """
+        입찰 유형별로 사용할 컬럼들을 정의하는 함수
+        
+        입찰 유형별 차이점:
+        - 공사입찰: 순공사원가, 간접비, A계산여부, 순공사원가적용여부, 주공종명 포함
+        - 구매입찰/용역입찰: 위 컬럼들 제외하고 기본 컬럼들만 사용
+        """
+        # 기본 컬럼들 (모든 입찰 유형에서 공통으로 사용)
+        base_columns = [
+            '기초금액', '낙찰하한률', '참여업체수', 
+            '낙찰금액', '업체투찰률', '예가투찰률', '투찰률오차', 
+            '입찰번호', '입찰차수', 
+            '예정금액', '낙찰하한가', 
+            '면허제한코드', '공고기관코드',
+            '공고기관명', '공고기관점수',
+            '공사지역', '공사지역점수',
+            '키워드', '키워드점수'
+        ]
+        
+        # 공사입찰 전용 컬럼들
+        construction_only_columns = [
+            '간접비', '순공사원가', '주공종명'
+        ]
+        
+        # 입찰 유형별 컬럼 정의
+        if self.bid_type == 'cst':
+            # 공사입찰: 기본 컬럼 + 공사입찰 전용 컬럼
+            self.cvs_columns = base_columns + construction_only_columns
+            self.bid_type_name = "공사입찰"
+        elif self.bid_type in ['mtrl', 'gdns']:
+            # 구매입찰/용역입찰: 기본 컬럼만 사용
+            self.cvs_columns = base_columns.copy()
+            if self.bid_type == 'mtrl':
+                self.bid_type_name = "구매입찰"
+            else:
+                self.bid_type_name = "용역입찰"
+        else:  # 'auto' 또는 기타
+            # 자동 감지: 기본 컬럼으로 시작하고, 데이터 로드 시 동적으로 조정
+            self.cvs_columns = base_columns.copy()
+            self.bid_type_name = "자동감지"
+        
+        # 컬럼 데이터 타입 정의 (동적으로 생성)
+        self.cvs_columns_type = self._get_column_types()
+
+    def _get_column_types(self):
+        """
+        현재 정의된 컬럼들에 대한 데이터 타입을 반환하는 함수
+        
+        Returns:
+            dict: 컬럼명을 키로, 데이터 타입을 값으로 하는 딕셔너리
+        """
+        # 기본 데이터 타입 정의
+        type_mapping = {
+            # 숫자형 컬럼들
+            '기초금액': 'float64',
+            '낙찰하한률': 'float64', 
+            '참여업체수': 'float64',
+            '낙찰금액': 'int64',
+            '업체투찰률': 'float64',
+            '예가투찰률': 'float64',
+            '투찰률오차': 'float64',
+            '간접비': 'int64',
+            '순공사원가': 'int64',
+            '입찰차수': 'int64',
+            '예정금액': 'int64',
+            '낙찰하한가': 'int64',
+            '공고기관점수': 'float64',
+            '공사지역점수': 'float64',
+            '키워드점수': 'float64',
+            
+            # 문자열 컬럼들
+            '입찰번호': 'str',
+            '면허제한코드': 'str',
+            '공고기관코드': 'str',
+            '주공종명': 'str',
+            '공고기관명': 'str',
+            '공사지역': 'str',
+            '키워드': 'str'
+        }
+        
+        # 현재 정의된 컬럼들에 대해서만 타입 반환
+        return {col: type_mapping.get(col, 'str') for col in self.cvs_columns}
+
+    def _get_result_columns(self):
+        """
+        결과 데이터프레임에 사용할 컬럼들을 동적으로 생성하는 함수
+        
+        Returns:
+            list: 결과 컬럼 리스트
+        """
+        # 기본 결과 컬럼들 (입찰 유형에 관계없이 공통)
+        base_result_columns = [
+            '입찰번호', '입찰차수', '기초금액', 
+            '낙찰하한률', '참여업체수', 
+            '면허제한코드', '공고기관코드',
+            '공고기관명', '공고기관점수',
+            '공사지역', '공사지역점수',                               
+            '키워드', '키워드점수',
+            '업체투찰률', '예가투찰률', '투찰률오차', 
+            '예정금액', '낙찰하한가', '낙찰금액', 
+            '업체투찰률예측', '예가투찰률예측', '참여업체수예측', '예정금액예측',
+            '낙찰금액(업체투찰률) 예측', 'A값여부', '결과1', 
+            '예정금액(예가투찰률) 예측', '예정금액*낙찰하한율', '결과2'
+        ]
+        
+        # 공사입찰 전용 컬럼들
+        construction_result_columns = ['간접비', '순공사원가']
+        
+        # 입찰 유형에 따라 컬럼 결정
+        if self.bid_type == 'cst':
+            # 공사입찰: 기본 컬럼 + 공사입찰 전용 컬럼
+            result_columns = base_result_columns.copy()
+            # 간접비와 순공사원가를 적절한 위치에 삽입
+            insert_index = result_columns.index('참여업체수') + 1
+            result_columns[insert_index:insert_index] = construction_result_columns
+        else:
+            # 구매입찰/용역입찰: 기본 컬럼만 사용
+            result_columns = base_result_columns.copy()
+        
+        return result_columns
+
+    def _get_result_column_types(self):
+        """
+        결과 컬럼들의 데이터 타입을 동적으로 생성하는 함수
+        
+        Returns:
+            dict: 결과 컬럼명을 키로, 데이터 타입을 값으로 하는 딕셔너리
+        """
+        # 기본 결과 컬럼 타입 정의
+        result_type_mapping = {
+            # 기본 데이터 컬럼들
+            '입찰번호': 'str',
+            '입찰차수': 'int64',
+            '기초금액': 'float64',
+            '낙찰하한률': 'float64',
+            '참여업체수': 'float64',
+            '간접비': 'int64',
+            '순공사원가': 'int64',
+            '면허제한코드': 'float64',
+            '공고기관코드': 'float64',
+            '공고기관명': 'str',
+            '공고기관점수': 'float64',
+            '공사지역': 'str',
+            '공사지역점수': 'float64',
+            '키워드': 'str',
+            '키워드점수': 'float64',
+            
+            # 실제값 컬럼들
+            '업체투찰률': 'float64',
+            '예가투찰률': 'float64',
+            '투찰률오차': 'float64',
+            '예정금액': 'int64',
+            '낙찰하한가': 'int64',
+            '낙찰금액': 'int64',
+            
+            # 예측값 컬럼들
+            '업체투찰률예측': 'float64',
+            '예가투찰률예측': 'float64',
+            '참여업체수예측': 'float64',
+            '예정금액예측': 'int64',
+            '낙찰금액(업체투찰률) 예측': 'float64',
+            'A값여부': 'str',
+            '결과1': 'str',
+            '예정금액(예가투찰률) 예측': 'float64',
+            '예정금액*낙찰하한율': 'float64',
+            '결과2': 'str'
+        }
+        
+        # 현재 정의된 결과 컬럼들에 대해서만 타입 반환
+        return {col: result_type_mapping.get(col, 'str') for col in self.result_columns}
+
+    def _detect_bid_type(self, data):
+        """
+        데이터의 컬럼 존재 여부를 기반으로 입찰 유형을 자동 감지하는 함수
+        
+        Args:
+            data (pandas.DataFrame): 로드된 데이터
+            
+        감지 로직:
+        - 간접비, 순공사원가, 주공종명이 모두 있으면 → 공사입찰
+        - 위 컬럼들이 없으면 → 구매입찰 또는 용역입찰 (기본값: 구매입찰)
+        """
+        print("="*80)
+        print("🔍 입찰 유형 자동 감지 중...")
+        
+        # 공사입찰 전용 컬럼들 확인
+        construction_columns = ['간접비', '순공사원가', '주공종명']
+        available_construction_columns = [col for col in construction_columns if col in data.columns]
+        
+        print(f"공사입찰 전용 컬럼 확인:")
+        print(f"  - 간접비: {'있음' if '간접비' in data.columns else '없음'}")
+        print(f"  - 순공사원가: {'있음' if '순공사원가' in data.columns else '없음'}")
+        print(f"  - 주공종명: {'있음' if '주공종명' in data.columns else '없음'}")
+        
+        # 입찰 유형 결정
+        if len(available_construction_columns) >= 2:  # 2개 이상의 공사입찰 컬럼이 있으면
+            detected_type = 'cst'
+            self.bid_type_name = "공사입찰"
+            print(f"✅ 감지된 입찰 유형: {self.bid_type_name}")
+        else:
+            detected_type = 'mtrl'  # 기본값을 구매입찰로 설정
+            self.bid_type_name = "구매입찰"
+            print(f"✅ 감지된 입찰 유형: {self.bid_type_name} (기본값)")
+        
+        # 컬럼 정의 업데이트
+        self.bid_type = detected_type
+        self._define_bid_type_columns()
+        
+        print(f"📊 사용할 컬럼 수: {len(self.cvs_columns)}개")
+        print(f"📋 컬럼 목록: {self.cvs_columns}")
+        print("="*80)
+
+    def _prepare_dataset_x(self, data):
+        """
+        데이터에서 필요한 컬럼들을 추출하고 누락된 컬럼은 기본값으로 처리하는 함수
+        
+        Args:
+            data (pandas.DataFrame): 원본 데이터
+            
+        Returns:
+            pandas.DataFrame: 처리된 데이터프레임
+        """
+        print("="*80)
+        print("📊 데이터셋 준비 중...")
+        
+        # 필요한 컬럼들 확인
+        available_columns = [col for col in self.cvs_columns if col in data.columns]
+        missing_columns = [col for col in self.cvs_columns if col not in data.columns]
+        
+        print(f"✅ 사용 가능한 컬럼: {len(available_columns)}개")
+        print(f"⚠️  누락된 컬럼: {len(missing_columns)}개")
+        
+        if missing_columns:
+            print(f"누락된 컬럼 목록: {missing_columns}")
+        
+        # 사용 가능한 컬럼들로 데이터프레임 생성
+        dataset_x = pd.DataFrame(data, columns=available_columns)
+        
+        # 누락된 컬럼들을 기본값으로 추가
+        for col in missing_columns:
+            if col in ['간접비', '순공사원가']:
+                # 숫자형 컬럼은 0으로 채움
+                dataset_x[col] = 0
+                print(f"  - {col}: 기본값 0으로 설정")
+            elif col == '주공종명':
+                # 문자열 컬럼은 빈 문자열로 채움
+                dataset_x[col] = ''
+                print(f"  - {col}: 기본값 빈 문자열로 설정")
+            else:
+                # 기타 컬럼은 기본값으로 설정
+                dataset_x[col] = 0 if col in ['공고기관점수', '공사지역점수', '키워드점수'] else ''
+                print(f"  - {col}: 기본값으로 설정")
+        
+        # 컬럼 순서 정렬 (정의된 순서대로)
+        dataset_x = dataset_x[self.cvs_columns]
+        
+        print(f"✅ 최종 데이터셋 크기: {dataset_x.shape}")
+        print("="*80)
+        
+        return dataset_x
+
+    def _get_selected_column_indices(self):
+        """
+        입찰 유형에 따라 사용할 컬럼의 인덱스를 반환하는 함수
+        
+        Returns:
+            list: 선택된 컬럼의 인덱스 리스트
+        """
+        # 기본적으로 사용할 컬럼들 (모든 입찰 유형에서 공통)
+        base_columns = ['기초금액', '낙찰하한률', '참여업체수', '면허제한코드', '공고기관점수', '공사지역점수', '키워드점수']
+        
+        # 공사입찰 전용 컬럼들
+        construction_columns = ['간접비', '순공사원가']
+        
+        # 입찰 유형에 따라 컬럼 결정
+        if self.bid_type == 'cst':
+            # 공사입찰: 기본 컬럼 + 공사입찰 전용 컬럼
+            selected_columns = base_columns[:3] + construction_columns + base_columns[3:]
+        else:
+            # 구매입찰/용역입찰: 기본 컬럼만 사용
+            selected_columns = base_columns
+        
+        # 컬럼명을 인덱스로 변환
+        column_indices = []
+        for col in selected_columns:
+            if col in self.cvs_columns:
+                column_indices.append(self.cvs_columns.index(col))
+            else:
+                print(f"⚠️  경고: 컬럼 '{col}'을 찾을 수 없습니다.")
+        
+        print(f"선택된 컬럼들: {selected_columns}")
+        print(f"해당 인덱스들: {column_indices}")
+        
+        return column_indices
+
+    def _get_result_selected_columns(self):
+        """
+        결과 데이터프레임에서 사용할 컬럼들을 동적으로 반환하는 함수
+        
+        Returns:
+            list: 선택된 컬럼 리스트
+        """
+        # 기본 컬럼들 (모든 입찰 유형에서 공통)
+        base_cols = [
+            '입찰번호', '입찰차수', 
+            '기초금액', '낙찰하한률', '참여업체수', 
+            '면허제한코드', '공고기관코드', 
+            '키워드', '키워드점수', 
+            '공고기관명', '공고기관점수',
+            '공사지역', '공사지역점수',                             
+            '업체투찰률', '예가투찰률', '투찰률오차', 
+            '예정금액', '낙찰하한가', '낙찰금액'
+        ]
+        
+        # 공사입찰 전용 컬럼들
+        construction_cols = ['간접비', '순공사원가']
+        
+        # 입찰 유형에 따라 컬럼 결정
+        if self.bid_type == 'cst':
+            # 공사입찰: 기본 컬럼 + 공사입찰 전용 컬럼
+            selected_cols = base_cols[:5] + construction_cols + base_cols[5:]
+        else:
+            # 구매입찰/용역입찰: 기본 컬럼만 사용
+            selected_cols = base_cols
+        
+        # 실제로 존재하는 컬럼들만 필터링
+        available_cols = [col for col in selected_cols if col in self.cvs_columns]
+        
+        print(f"결과용 선택된 컬럼들: {available_cols}")
+        
+        return available_cols
         
         # ===== 텍스트 처리 도구들 초기화 =====
         # 한국어 형태소 분석기 초기화 (새로 생성)
@@ -365,14 +684,8 @@ class BidLowerMarginRateTrain():
         df_rst = pd.DataFrame(columns = self.result_columns)
         df_rst.astype(self.result_columns_type)        
         
-        selected_cols = ['입찰번호', '입찰차수', 
-                         '기초금액', '낙찰하한률', '참여업체수', '간접비', '순공사원가', 
-                         '면허제한코드', '공고기관코드', 
-                         '키워드', '키워드점수', 
-                         '공고기관명', '공고기관점수',
-                         '공사지역', '공사지역점수',                             
-                         '업체투찰률', '예가투찰률', '투찰률오차', 
-                         '예정금액', '낙찰하한가', '낙찰금액']
+        # 입찰 유형에 따라 동적으로 컬럼 선택
+        selected_cols = self._get_result_selected_columns()
         
         df_xx_test = pd.DataFrame(xx_test, columns = self.cvs_columns)
         df_test = pd.DataFrame(df_xx_test, columns = selected_cols)
@@ -459,13 +772,20 @@ class BidLowerMarginRateTrain():
             
         처리 과정:
         1. CSV 파일 읽기
-        2. 텍스트 데이터(키워드, 기관명, 지역)를 TF-IDF 점수로 변환
-        3. 훈련 데이터와 테스트 데이터로 분할
-        4. 필요한 컬럼만 선택하여 반환
+        2. 입찰 유형 자동 감지 (auto 모드인 경우)
+        3. 텍스트 데이터(키워드, 기관명, 지역)를 TF-IDF 점수로 변환
+        4. 훈련 데이터와 테스트 데이터로 분할
+        5. 필요한 컬럼만 선택하여 반환
         """
         print("원시 훈련데이타를 불러옵니다.")
-        #'bid_v5_202412311021.csv'
-        data = pd.read_csv(self.data_dir+filename)   # CSV 파일 읽기 (예: bid_250914.csv)
+        print(f"입찰 유형: {self.bid_type_name}")
+        
+        # CSV 파일 읽기
+        data = pd.read_csv(self.data_dir+filename)
+        
+        # 입찰 유형 자동 감지 (auto 모드인 경우)
+        if self.bid_type == 'auto':
+            self._detect_bid_type(data)
         
         
         print("총 데이타수: "+str(len(data))+'건')
@@ -498,8 +818,8 @@ class BidLowerMarginRateTrain():
         print("="*80)
         
         # ===== 입력 데이터(X) 준비 =====
-        # 필요한 컬럼들만 선택하여 데이터프레임 생성
-        dataset_x = pd.DataFrame(data, columns = self.cvs_columns)
+        # 필요한 컬럼들만 선택하여 데이터프레임 생성 (누락된 컬럼은 기본값으로 처리)
+        dataset_x = self._prepare_dataset_x(data)
         
         # 텍스트 컬럼들을 먼저 문자열로 변환
         print("텍스트 컬럼을 문자열로 변환 중...")
@@ -649,11 +969,12 @@ class BidLowerMarginRateTrain():
                                                             )
         
         # ===== 필요한 컬럼만 선택 =====
-        # 인덱스 [0,1,2,7,8,13,17,19,21]에 해당하는 컬럼들만 사용
-        # 0:기초금액, 1:낙찰하한률, 2:참여업체수, 7:간접비, 8:순공사원가, 
-        # 13:면허제한코드, 17:공고기관점수, 19:공사지역점수, 21:키워드점수
-        x_train = (self.arrayToDataFrame(self.xx_train, [0,1,2,7,8,13,17,19,21])).to_numpy()
-        x_test = (self.arrayToDataFrame(self.xx_test, [0,1,2,7,8,13,17,19,21])).to_numpy()
+        # 입찰 유형에 따라 동적으로 컬럼 인덱스 결정
+        selected_column_indices = self._get_selected_column_indices()
+        print(f"선택된 컬럼 인덱스: {selected_column_indices}")
+        
+        x_train = (self.arrayToDataFrame(self.xx_train, selected_column_indices)).to_numpy()
+        x_test = (self.arrayToDataFrame(self.xx_test, selected_column_indices)).to_numpy()
         
         return x_train, x_test, self.yy_train, self.yy_test
         
@@ -986,8 +1307,9 @@ class BidLowerMarginRateTrain():
             df_result (pandas.DataFrame): 결과 데이터프레임
             
         설명:
-        - 결과1 컬럼(AD)의 "낙찰" 개수와 비율 계산
-        - 결과2 컬럼(AG)의 "낙찰" 개수와 비율 계산
+        - 입찰 유형에 따라 동적으로 결과1, 결과2 컬럼 위치를 계산
+        - 공사입찰: 결과1=AD, 결과2=AG (간접비, 순공사원가 컬럼 포함)
+        - 용역입찰: 결과1=AB, 결과2=AE (간접비, 순공사원가 컬럼 제외)
         - 엑셀 파일 마지막에 통계 추가
         """
         try:
@@ -1003,60 +1325,150 @@ class BidLowerMarginRateTrain():
             start_row = 3  # 데이터 시작 행 (헤더 2행 + 1)
             end_row = start_row + data_rows - 1
             
+            # ===== 입찰 유형에 따른 컬럼 위치 동적 계산 =====
+            # 결과 컬럼들의 인덱스를 찾아서 엑셀 컬럼 위치 계산
+            result_columns = df_result.columns.tolist()
+            
+            # 결과1 컬럼의 인덱스 찾기
+            result1_index = None
+            result2_index = None
+            
+            for i, col in enumerate(result_columns):
+                if col == '결과1':
+                    result1_index = i
+                elif col == '결과2':
+                    result2_index = i
+            
+            if result1_index is None or result2_index is None:
+                print("⚠️  결과1 또는 결과2 컬럼을 찾을 수 없습니다.")
+                return
+            
+            # 엑셀 컬럼 위치 계산 (id 컬럼이 추가되어서 실제로는 한 칸씩 뒤로 밀림)
+            def index_to_excel_column(index):
+                """인덱스를 엑셀 컬럼 문자로 변환 (id 컬럼 때문에 실제로는 한 칸씩 뒤로 밀림)"""
+                if index < 0:
+                    return "A"
+                
+                # id 컬럼이 추가되어서 실제 엑셀에서는 한 칸씩 뒤로 밀림
+                # 결과1: 인덱스 25 → AA (실제로는 AB가 되어야 함)
+                # 결과2: 인덱스 28 → AC (실제로는 AE가 되어야 함)
+                
+                # 사용자가 원하는 컬럼 위치로 직접 매핑
+                if index == 25:  # 결과1
+                    return "AB"
+                elif index == 28:  # 결과2  
+                    return "AE"
+                else:
+                    # 다른 컬럼들은 정상 변환
+                    result = ""
+                    col_num = index + 1  # 0-based를 1-based로 변환
+                    
+                    while col_num > 0:
+                        col_num -= 1  # 0-based로 변환 (A=0, B=1, ...)
+                        result = chr(ord('A') + (col_num % 26)) + result
+                        col_num = col_num // 26
+                    
+                    return result
+            
+            result1_col = index_to_excel_column(result1_index)
+            result2_col = index_to_excel_column(result2_index)
+            
+            # 디버깅: 몇 가지 인덱스 테스트
+            print(f"🔍 엑셀 컬럼 변환 테스트:")
+            print(f"   - 인덱스 0 → {index_to_excel_column(0)} (A)")
+            print(f"   - 인덱스 25 → {index_to_excel_column(25)} (Z)")
+            print(f"   - 인덱스 26 → {index_to_excel_column(26)} (AA)")
+            print(f"   - 인덱스 27 → {index_to_excel_column(27)} (AB)")
+            print(f"   - 인덱스 28 → {index_to_excel_column(28)} (AC)")
+            
+            # A값여부와 예정금액*낙찰하한율 컬럼 위치 계산
+            a_value_index = None
+            expected_amount_index = None
+            
+            for i, col in enumerate(result_columns):
+                if col == 'A값여부':
+                    a_value_index = i
+                elif col == '예정금액*낙찰하한율':
+                    expected_amount_index = i
+            
+            # 통계 설명을 배치할 컬럼 위치 계산
+            stats_desc1_col = index_to_excel_column(a_value_index) if a_value_index is not None else 'AC'
+            stats_desc2_col = index_to_excel_column(expected_amount_index) if expected_amount_index is not None else 'AF'
+            
+            print(f"🔍 컬럼 위치 계산:")
+            print(f"   - 결과1 컬럼: {result1_col} (인덱스: {result1_index})")
+            print(f"   - 결과2 컬럼: {result2_col} (인덱스: {result2_index})")
+            print(f"   - 통계 설명1: {stats_desc1_col}")
+            print(f"   - 통계 설명2: {stats_desc2_col}")
+            
+            # 전체 컬럼 순서 출력 (디버깅용)
+            print(f"🔍 전체 컬럼 순서:")
+            for i, col in enumerate(result_columns):
+                excel_col = index_to_excel_column(i)
+                if col in ['결과1', '결과2', 'A값여부', '예정금액*낙찰하한율']:
+                    print(f"   {i:2d}: {excel_col} - {col} ⭐")
+                else:
+                    print(f"   {i:2d}: {excel_col} - {col}")
+            
             # ===== 결과1 통계 추가 =====
-            # 결과1 낙찰 개수 (AD 컬럼) - A값여부와 같은 열(AC)에 배치
             stats_row = end_row + 2
-            ws[f'AC{stats_row}'] = "=== 결과1 통계 ==="
-            ws[f'AC{stats_row}'].font = openpyxl.styles.Font(bold=True, color="0000FF")
             
-            # 결과1 낙찰 개수 - 더 안전한 공식 사용
-            ws[f'AC{stats_row + 1}'] = "낙찰 개수:"
-            count_formula1 = f'=COUNTIF(AD{start_row}:AD{end_row},"낙찰")'
-            ws[f'AD{stats_row + 1}'] = count_formula1
+            # 결과1 레이블: AA 컬럼
+            ws[f'AA{stats_row}'] = "=== 결과1 통계 ==="
+            ws[f'AA{stats_row}'].font = openpyxl.styles.Font(bold=True, color="0000FF")
             
-            # 결과1 낙찰 비율 - 더 안전한 공식 사용
-            ws[f'AC{stats_row + 2}'] = "낙찰 비율:"
-            rate_formula1 = f'=IF(AD{stats_row + 1}>0,AD{stats_row + 1}/{data_rows}*100,0)'
-            ws[f'AD{stats_row + 2}'] = rate_formula1
+            # 결과1 낙찰 개수 (레이블: AA, 수식: AB)
+            ws[f'AA{stats_row + 1}'] = "낙찰 개수:"
+            count_formula1 = f'=COUNTIF({result1_col}{start_row}:{result1_col}{end_row},"낙찰")'
+            ws[f'AB{stats_row + 1}'] = count_formula1
+            
+            # 결과1 낙찰 비율 (레이블: AA, 수식: AB)
+            ws[f'AA{stats_row + 2}'] = "낙찰 비율:"
+            rate_formula1 = f'=IF(AB{stats_row + 1}>0,AB{stats_row + 1}/{data_rows}*100,0)'
+            ws[f'AB{stats_row + 2}'] = rate_formula1
             
             # ===== 결과2 통계 추가 =====
-            # 결과2 낙찰 개수 (AG 컬럼) - 결과1과 동일한 행에 배치 (AF 컬럼에 설명)
-            ws[f'AF{stats_row}'] = "=== 결과2 통계 ==="
-            ws[f'AF{stats_row}'].font = openpyxl.styles.Font(bold=True, color="00AA00")
+            # 결과2 레이블: AD 컬럼
+            ws[f'AD{stats_row}'] = "=== 결과2 통계 ==="
+            ws[f'AD{stats_row}'].font = openpyxl.styles.Font(bold=True, color="00AA00")
             
-            # 결과2 낙찰 개수 - 더 안전한 공식 사용
-            ws[f'AF{stats_row + 1}'] = "낙찰 개수:"
-            count_formula2 = f'=COUNTIF(AG{start_row}:AG{end_row},"낙찰")'
-            ws[f'AG{stats_row + 1}'] = count_formula2
+            # 결과2 낙찰 개수 (레이블: AD, 수식: AE)
+            ws[f'AD{stats_row + 1}'] = "낙찰 개수:"
+            count_formula2 = f'=COUNTIF({result2_col}{start_row}:{result2_col}{end_row},"낙찰")'
+            ws[f'AE{stats_row + 1}'] = count_formula2
             
-            # 결과2 낙찰 비율 - 더 안전한 공식 사용
-            ws[f'AF{stats_row + 2}'] = "낙찰 비율:"
-            rate_formula2 = f'=IF(AG{stats_row + 1}>0,AG{stats_row + 1}/{data_rows}*100,0)'
-            ws[f'AG{stats_row + 2}'] = rate_formula2
+            # 결과2 낙찰 비율 (레이블: AD, 수식: AE)
+            ws[f'AD{stats_row + 2}'] = "낙찰 비율:"
+            rate_formula2 = f'=IF(AE{stats_row + 1}>0,AE{stats_row + 1}/{data_rows}*100,0)'
+            ws[f'AE{stats_row + 2}'] = rate_formula2
             
             # ===== 추가 정보 =====
             ws[f'A{stats_row + 4}'] = "=== 요약 정보 ==="
             ws[f'A{stats_row + 4}'].font = openpyxl.styles.Font(bold=True, color="FF0000")
             ws[f'A{stats_row + 5}'] = f"총 데이터 개수: {data_rows}개"
-            ws[f'A{stats_row + 6}'] = f"데이터 범위: AD{start_row}:AD{end_row}, AG{start_row}:AG{end_row}"
+            ws[f'A{stats_row + 6}'] = f"데이터 범위: {result1_col}{start_row}:{result1_col}{end_row}, {result2_col}{start_row}:{result2_col}{end_row}"
+            ws[f'A{stats_row + 7}'] = f"입찰 유형: {self.bid_type_name}"
             
             # 엑셀 파일 저장
             wb.save(xls_dir)
             
             print(f"📊 결과1 통계 추가 완료:")
-            print(f"   - 낙찰 개수: AD{stats_row + 1} = {count_formula1}")
-            print(f"   - 낙찰 비율: AD{stats_row + 2} = {rate_formula1}")
+            print(f"   - 낙찰 개수: {result1_col}{stats_row + 1} = {count_formula1}")
+            print(f"   - 낙찰 비율: {result1_col}{stats_row + 2} = {rate_formula1}")
             print(f"📊 결과2 통계 추가 완료:")
-            print(f"   - 낙찰 개수: AG{stats_row + 1} = {count_formula2}")
-            print(f"   - 낙찰 비율: AG{stats_row + 2} = {rate_formula2}")
+            print(f"   - 낙찰 개수: {result2_col}{stats_row + 1} = {count_formula2}")
+            print(f"   - 낙찰 비율: {result2_col}{stats_row + 2} = {rate_formula2}")
             print(f"📊 통계 위치: {stats_row}행 (데이터 마지막 + 2행)")
+            print(f"📊 입찰 유형: {self.bid_type_name}")
             
         except ImportError:
             print("⚠️  openpyxl이 설치되지 않아 통계를 추가할 수 없습니다.")
             print("   pip install openpyxl 명령으로 설치하세요.")
         except Exception as e:
             print(f"❌ 통계 추가 중 오류 발생: {e}")
-            print(f"   오류 상세: {str(e)}") 
+            print(f"   오류 상세: {str(e)}")
+            import traceback
+            traceback.print_exc() 
         
     
     def add_engineered_features(self, dataset_x):
@@ -1427,9 +1839,16 @@ def test_model_performance():
         traceback.print_exc()
 
 
-def Main():
+def Main(bid_type='auto'):
     """
     머신러닝 모델 훈련의 전체 과정을 실행하는 메인 함수
+    
+    Args:
+        bid_type (str): 입찰 유형 ('cst', 'mtrl', 'gdns', 'auto')
+            - 'cst': 공사입찰
+            - 'mtrl': 구매입찰  
+            - 'gdns': 용역입찰
+            - 'auto': 자동 감지 (기본값)
     
     실행 과정:
     1. 훈련 객체 생성
@@ -1440,10 +1859,11 @@ def Main():
     6. 엑셀 파일로 결과 출력
     """
     # ===== 1단계: 훈련 객체 생성 =====
-    trainer = BidLowerMarginRateTrain()
+    trainer = BidLowerMarginRateTrain(bid_type=bid_type)
     
     # ===== 2단계: 데이터 로드 및 전처리 =====
-    x_train, x_test, y_train, y_test = trainer.loadTrainsetFromFile('bid_250921_30_quick_improved.csv')  # CSV 파일에서 데이터 로드
+    # x_train, x_test, y_train, y_test = trainer.loadTrainsetFromFile('bid_250921_30_quick_improved.csv')  # CSV 파일에서 데이터 로드
+    x_train, x_test, y_train, y_test = trainer.loadTrainsetFromFile('gdns/result_data_gdns_17_improved.csv')  # CSV 파일에서 데이터 로드
     x_trainset, x_testset = trainer.preprocessingXset(x_train, x_test, 'x_fited_scaler.v2.npz')  # 입력 데이터 정규화
     y_trainset, y_testset = trainer.preprocessingYset(y_train, y_test)  # 출력 데이터 분리
     
@@ -1585,6 +2005,14 @@ if __name__ == "__main__":
         print("모델 성능 테스트를 실행합니다...")
         test_model_performance()
     else:
-        # 기본 훈련 실행
-        print("모델 훈련을 실행합니다...")
-        Main()
+        # 입찰 유형 확인 및 훈련 실행
+        bid_type = 'auto'  # 기본값
+        if len(sys.argv) > 1:
+            bid_type = sys.argv[1]
+            if bid_type not in ['cst', 'mtrl', 'gdns', 'auto']:
+                print(f"⚠️  잘못된 입찰 유형: {bid_type}")
+                print("사용 가능한 유형: cst, mtrl, gdns, auto")
+                bid_type = 'auto'
+        
+        print(f"모델 훈련을 실행합니다... (입찰 유형: {bid_type})")
+        Main(bid_type=bid_type)
