@@ -251,6 +251,16 @@ class DatabaseManager:
             
             self.__map[con.getName()] = con
             
+            # 2. 예측 결과 DB
+            con2 = Connection.of(ConnectionAttribute.build(
+                                                        'prediction_result'
+                                                        , 'prediction_result.db'
+                                                        , self.default_local_path
+                                                        , "file://" + self.default_local_path + "\\setup\\prediction_result.sql"
+                                                        ))
+            
+            self.__map[con2.getName()] = con2
+            
             # 테이블이 존재하지 않는다면 초기화
             self.createIfNotExists()
         

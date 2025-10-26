@@ -10,3 +10,5 @@ numpy>=1.21.0
 scipy>=1.7.0
 joblib>=1.0.0
 catboost>=1.2.5
+pyodbc>=4.0.0
+sqlalchemy>=1.4.0

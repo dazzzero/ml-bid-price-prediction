@@ -15,6 +15,11 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from scipy.sparse import csr_matrix
 from kiwipiepy import Kiwi
 
+# 데이터베이스 관련 import 추가
+sys.path.append(os.path.join(os.getcwd(), 'dac'))
+from PredictionResultManager import PredictionResultManager
+from SqlServerPredictionManager import SqlServerPredictionManager
+
 # KiwiTokenizer 클래스 (bid.ml.train.py에서 복사)
 class KiwiTokenizer():
     def __init__(self, saved_filenm):
@@ -142,7 +147,7 @@ class SampleDataPredictor():
     샘플 데이터 예측 클래스
     """
     
-    def __init__(self):
+    def __init__(self, use_sql_server=False, db_config=None):
         print("="*80)
         print("🔮 샘플 데이터 예측 시스템 초기화")
         print("="*80)
@@ -152,6 +157,32 @@ class SampleDataPredictor():
         self.save_dir = self.cur_dir + '\\res\\7.7\\'
         
         self.load_models_and_preprocessors()
+        
+        # 데이터베이스 매니저 초기화
+        try:
+            print("🗄️  데이터베이스 매니저 초기화 중...")
+            
+            if use_sql_server and db_config:
+                # SQL Server 사용
+                print("📊 SQL Server 연결 중...")
+                self.db_manager = SqlServerPredictionManager(
+                    host=db_config['host'],
+                    port=db_config['port'],
+                    database=db_config['database'],
+                    username=db_config['username'],
+                    password=db_config['password']
+                )
+                print("✅ SQL Server 데이터베이스 매니저 초기화 완료")
+            else:
+                # SQLite 사용 (기본값)
+                print("📁 SQLite 연결 중...")
+                self.db_manager = PredictionResultManager()
+                print("✅ SQLite 데이터베이스 매니저 초기화 완료")
+                
+        except Exception as e:
+            print(f"⚠️  데이터베이스 매니저 초기화 실패: {e}")
+            self.db_manager = None
+        
         print("✅ 예측 시스템 초기화 완료")
         print("="*80)
     
@@ -348,37 +379,68 @@ class SampleDataPredictor():
         if '입찰차수' in original_data.columns:
             result_df.insert(1, '입찰차수', original_data['입찰차수'].values)
         
-        # 예측 결과 컬럼들 추가
-        result_df['업체투찰률예측'] = pred1
-        result_df['예가투찰률예측'] = pred2
-        result_df['참여업체수예측'] = pred3
+        # 예측 결과 컬럼들 추가 (새로운 컬럼명으로 변경)
+        result_df['업체투찰률_예측'] = pred1
+        result_df['예가투찰률_예측'] = pred2
+        result_df['참여업체수_예측'] = pred3
         
-        # 추가 계산 컬럼들
-        result_df['예정금액예측'] = (result_df['예가투찰률예측'] * result_df['기초금액']) / result_df['낙찰하한률']
-        result_df['낙찰금액(업체투찰률)예측'] = result_df['업체투찰률예측'] * result_df['기초금액']
-        # A값여부: 간접비가 0원이 아닐 경우 O, 0원일 경우 X
-        result_df['A값여부'] = result_df['간접비'].apply(lambda x: 'O' if x != 0 else 'X')
+        # 추가 계산 컬럼들 (올바른 공식 적용)
+        # 예정금액 = 기초금액 × 예가투찰률
+        result_df['예정금액예측'] = result_df['기초금액'] * result_df['예가투찰률_예측']
+        
+        # 낙찰금액(업체투찰률) = 기초금액 × 업체투찰률
+        result_df['낙찰금액(업체투찰률)예측'] = result_df['기초금액'] * result_df['업체투찰률_예측']
+        
+        # 낙찰하한금액 = 기초금액 × 낙찰하한률
+        result_df['낙찰하한금액'] = result_df['기초금액'] * result_df['낙찰하한률']
+        
+        # A계산여부: 간접비가 0원이 아닐 경우 O, 0원일 경우 X
+        result_df['A계산여부'] = result_df['간접비'].apply(lambda x: 'O' if x != 0 else 'X')
+        
+        # 새로 추가된 컬럼들에 기본값 설정
+        result_df['기초금액률'] = 0.0  # 기본값
+        result_df['순공사원가적용여부'] = '0'  # 기본값
+        result_df['주공종명'] = ''  # 기본값
+        result_df['공고일자'] = None  # 기본값
+        result_df['개찰일시'] = None  # 기본값
+        result_df['예측_URL'] = f"sample_prediction_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"  # 기본값
         
         print("✅ 예측 완료")
         print(f"   - 업체투찰률 예측 범위: {pred1.min():.3f} ~ {pred1.max():.3f}")
         print(f"   - 예가투찰률 예측 범위: {pred2.min():.3f} ~ {pred2.max():.3f}")
         print(f"   - 참여업체수 예측 범위: {pred3.min():.1f} ~ {pred3.max():.1f}")
         
+        print("\n📊 투찰률 공식:")
+        print("   - 업체투찰률 = (업체투찰금액 / 기초금액) × 100")
+        print("   - 예가투찰률 = (예정가격 / 기초금액) × 100")
+        print("   - 낙찰하한률 = (낙찰하한가격 / 기초금액) × 100")
+        
         return result_df
     
-    def save_predictions(self, result_df, output_file):
-        """예측 결과를 엑셀 파일로 저장"""
+    def save_predictions(self, result_df, output_file, save_to_db=True, model_version="v0.1.1", insert_mode="REPLACE"):
+        """예측 결과를 엑셀 파일과 데이터베이스에 저장"""
         print("="*80)
         print("💾 예측 결과 저장 중...")
         print("="*80)
         
-        # 결과 저장 디렉토리 생성
-        result_dir = os.path.join(self.save_dir, "predict_result")
-        os.makedirs(result_dir, exist_ok=True)
+        # 1. 엑셀 파일로 저장
+        self._save_to_excel(result_df, output_file)
         
-        output_path = os.path.join(result_dir, output_file)
-        
+        # 2. 데이터베이스에 저장
+        if save_to_db and self.db_manager:
+            self._save_to_database(result_df, model_version, insert_mode)
+        elif save_to_db and not self.db_manager:
+            print("⚠️  데이터베이스 매니저가 없어 DB 저장을 건너뜁니다.")
+    
+    def _save_to_excel(self, result_df, output_file):
+        """엑셀 파일로 저장"""
         try:
+            # 결과 저장 디렉토리 생성
+            result_dir = os.path.join(self.save_dir, "predict_result")
+            os.makedirs(result_dir, exist_ok=True)
+            
+            output_path = os.path.join(result_dir, output_file)
+            
             result_df.to_excel(
                 output_path,
                 sheet_name='예측결과',
@@ -389,7 +451,7 @@ class SampleDataPredictor():
                 index_label="id",
                 freeze_panes=(1, 0)
             )
-            print(f"✅ 예측 결과 저장 완료: {output_path}")
+            print(f"✅ 엑셀 파일 저장 완료: {output_path}")
             print(f"📊 데이터 크기: {len(result_df)}행 x {len(result_df.columns)}열")
             
         except Exception as e:
@@ -404,18 +466,67 @@ class SampleDataPredictor():
                            index_label="id",
                            encoding='utf-8-sig')
             print(f"✅ CSV 파일로 저장 완료: {csv_path}")
+    
+    def _save_to_database(self, result_df, model_version, insert_mode="REPLACE"):
+        """데이터베이스에 저장"""
+        try:
+            print("🗄️  데이터베이스에 저장 중...")
+            
+            # 현재 시간을 비고에 포함
+            remarks = f"샘플 데이터 예측 - {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # 데이터베이스 타입에 따라 저장 방식 선택
+            if hasattr(self.db_manager, 'save_prediction_with_options'):
+                # SQLite용 메서드
+                saved_count = self.db_manager.save_prediction_with_options(
+                    result_df, 
+                    model_version=model_version, 
+                    remarks=remarks,
+                    insert_mode=insert_mode
+                )
+            else:
+                # SQL Server용 메서드
+                saved_count = self.db_manager.save_prediction_results(
+                    result_df, 
+                    model_version=model_version, 
+                    remarks=remarks,
+                    insert_mode=insert_mode
+                )
+            
+            print(f"✅ 데이터베이스 저장 완료: {saved_count}건")
+            
+            # 저장 후 통계 출력
+            summary = self.db_manager.get_prediction_summary()
+            if summary:
+                print(f"📊 데이터베이스 총 저장 건수: {summary[0]}건")
+                print(f"📊 평균 업체투찰률: {summary[1]:.3f}")
+                print(f"📊 평균 예가투찰률: {summary[2]:.3f}")
+                print(f"📊 평균 참여업체수: {summary[3]:.1f}")
+            
+        except Exception as e:
+            print(f"❌ 데이터베이스 저장 실패: {e}")
+            print("엑셀 파일은 정상적으로 저장되었습니다.")
 
 def main():
     """메인 실행 함수"""
     data_file = "sample_prediction_data.csv"
+    
+    # SQL Server 연결 설정
+    db_config = {
+        'host': '192.168.0.218',
+        'port': 1433,
+        'database': 'bips',
+        'username': 'bips',
+        'password': 'bips1!'
+    }
     
     try:
         print("="*80)
         print("🎯 샘플 데이터 예측 시작")
         print("="*80)
         
-        # 예측기 생성
-        predictor = SampleDataPredictor()
+        # 예측기 생성 (SQL Server 사용)
+        predictor = SampleDataPredictor(use_sql_server=True, db_config=db_config)
         
         # 데이터 전처리
         processed_data = predictor.preprocess_data(data_file)
@@ -423,22 +534,23 @@ def main():
         # 예측 수행
         predictions = predictor.predict_data(processed_data)
         
-        # 결과 저장
+        # 결과 저장 (엑셀 파일 + SQL Server 데이터베이스)
         output_file = f"sample_prediction_result_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        predictor.save_predictions(predictions, output_file)
+        predictor.save_predictions(predictions, output_file, save_to_db=True, model_version="v0.1.1")
         
         print("="*80)
         print("🎉 예측 프로세스 완료!")
         print(f"📁 결과 파일: res/predict_result/{output_file}")
+        print(f"🗄️  데이터베이스: SQL Server (192.168.0.218:1433/bips)")
         print("="*80)
         
         # 예측 결과 요약 출력
         print("\n📊 예측 결과 요약:")
         print(f"총 예측 건수: {len(predictions)}")
-        print(f"업체투찰률 평균: {predictions['업체투찰률예측'].mean():.3f}")
-        print(f"예가투찰률 평균: {predictions['예가투찰률예측'].mean():.3f}")
-        print(f"참여업체수 평균: {predictions['참여업체수예측'].mean():.1f}")
-        print(f"A값 여부: {predictions['A값여부'].value_counts().to_dict()}")
+        print(f"업체투찰률 평균: {predictions['업체투찰률_예측'].mean():.3f}")
+        print(f"예가투찰률 평균: {predictions['예가투찰률_예측'].mean():.3f}")
+        print(f"참여업체수 평균: {predictions['참여업체수_예측'].mean():.1f}")
+        print(f"A계산 여부: {predictions['A계산여부'].value_counts().to_dict()}")
         
     except Exception as e:
         print(f"❌ 오류 발생: {e}")
