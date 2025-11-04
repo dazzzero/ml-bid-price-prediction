@@ -5,6 +5,7 @@
 """
 
 import os
+import glob
 import sys
 import pandas as pd
 import numpy as np
@@ -19,6 +20,22 @@ from kiwipiepy import Kiwi
 sys.path.append(os.path.join(os.getcwd(), 'dac'))
 from PredictionResultManager import PredictionResultManager
 from SqlServerPredictionManager import SqlServerPredictionManager
+
+# 전역 파일명 패턴 (파일명이 바뀌어도 이 패턴만 유지하면 동작)
+RESULT_FILE_PATTERN = "result_*_rslt_n.csv"
+
+def resolve_latest_result_csv(bid_type, base_data_dir):
+    """입찰 유형별 디렉터리에서 전역 패턴에 맞는 최신 CSV 파일명을 반환
+    반환값은 self.data_dir와 더해서 사용 가능한 형태(예: "/gdns/파일명.csv")
+    """
+    subdir = {'cst': 'cst', 'mtrl': 'mtrl', 'gdns': 'gdns'}.get(bid_type, 'gdns')
+    search_dir = os.path.join(base_data_dir, subdir)
+    candidates = glob.glob(os.path.join(search_dir, RESULT_FILE_PATTERN))
+    if not candidates:
+        # 후보가 없으면 기존 명명 규칙으로 폴백
+        return f"/{subdir}/result_{subdir}_rslt_n.csv"
+    latest = max(candidates, key=os.path.getmtime)
+    return f"/{subdir}/" + os.path.basename(latest)
 
 # KiwiTokenizer 클래스 (bid.ml.train.py에서 복사)
 class KiwiTokenizer():
@@ -54,7 +71,9 @@ class KiwiTokenizer():
                 o = Kiwi(num_workers=8)
             else:
                 o = Kiwi(num_workers=8)
-                o._user_values = self.load(self.save_dir+saved_filenm)
+                # save_dir이 설정되었으면 그 경로 사용, 아니면 기본 경로 사용
+                load_path = os.path.join(self.save_dir, saved_filenm) if hasattr(self, 'save_dir') else (self.save_dir + saved_filenm)
+                o._user_values = self.load(load_path)
         return o
             
     def cleared_line(self, line):
@@ -147,15 +166,38 @@ class SampleDataPredictor():
     샘플 데이터 예측 클래스
     """
     
-    def __init__(self, use_sql_server=False, db_config=None, table_name='ML_CST_RSLT_Y'):
+    def __init__(self, bid_type, use_sql_server=False, db_config=None, table_name='ML_MTRL_RSLT_Y_TEST'):
         print("="*80)
         print("🔮 샘플 데이터 예측 시스템 초기화")
         print("="*80)
         
+        # bid_type 유효성 검사
+        valid_bid_types = ['cst', 'gdns', 'mtrl']
+        if bid_type not in valid_bid_types:
+            raise ValueError(f"bid_type은 반드시 {valid_bid_types} 중 하나여야 합니다. 현재 값: {bid_type}")
+        
         self.cur_dir = os.getcwd()
         self.data_dir = self.cur_dir + '\\data\\'
-        self.save_dir = self.cur_dir + '\\res\\7.7\\'
         
+        # 입찰 유형 설정
+        self.bid_type = bid_type
+        self.is_construction = (bid_type == 'cst')  # 공사입찰 여부 플래그
+        
+        # 입찰 유형에 따라 모델 경로 설정
+        if bid_type == 'cst':
+            self.model_dir = self.cur_dir + '\\res\\model\\cst\\'
+            self.bid_type_name = '공사입찰'
+        elif bid_type == 'gdns':
+            self.model_dir = self.cur_dir + '\\res\\model\\gdns\\'
+            self.bid_type_name = '용역입찰'
+        elif bid_type == 'mtrl':
+            self.model_dir = self.cur_dir + '\\res\\model\\mtrl\\'
+            self.bid_type_name = '구매입찰'
+        
+        print(f"📂 모델 경로: {self.model_dir}")
+        print(f"🏷️  입찰 유형: {self.bid_type_name}")
+        
+        # 모델 로드
         self.load_models_and_preprocessors()
         
         # 데이터베이스 매니저 초기화
@@ -192,26 +234,29 @@ class SampleDataPredictor():
         try:
             # 1. 형태소 분석기 로드
             print("📚 형태소 분석기 로드 중...")
+            # 파일명만 전달하고, 나중에 save_dir 설정
             self.tokenizer = KiwiTokenizer("mlpregr.tokenizer.v0.1.1.npz")
+            self.tokenizer.save_dir = self.model_dir
             self.tokenizer.loadDictonary('표준국어대사전.NNP.csv')
             print("✅ 형태소 분석기 로드 완료")
             
             # 2. TF-IDF 벡터화기 로드
             print("🔤 TF-IDF 벡터화기 로드 중...")
             self.vectorizer = KiwiVectorizer()
+            self.vectorizer.save_dir = self.model_dir
             self.vectorizer.load("mlpregr.vectorizer.v0.1.1.npz")
             print("✅ TF-IDF 벡터화기 로드 완료")
             
             # 3. 정규화 도구 로드
             print("📊 정규화 도구 로드 중...")
-            self.scaler = joblib.load(self.save_dir + "x_fited_scaler.v2.npz")
+            self.scaler = joblib.load(os.path.join(self.model_dir, "x_fited_scaler.v2.npz"))
             print("✅ 정규화 도구 로드 완료")
             
             # 4. 머신러닝 모델들 로드
             print("🤖 머신러닝 모델들 로드 중...")
-            self.model1 = joblib.load(self.save_dir + "mlpregr.model1.v0.1.1.npz")  # 업체투찰률
-            self.model2 = joblib.load(self.save_dir + "mlpregr.model2.v0.1.1.npz")  # 예가투찰률
-            self.model3 = joblib.load(self.save_dir + "mlpregr.model3.v0.1.1.npz")  # 참여업체수
+            self.model1 = joblib.load(os.path.join(self.model_dir, "mlpregr.model1.v0.1.1.npz"))  # 업체투찰률
+            self.model2 = joblib.load(os.path.join(self.model_dir, "mlpregr.model2.v0.1.1.npz"))  # 예가투찰률
+            self.model3 = joblib.load(os.path.join(self.model_dir, "mlpregr.model3.v0.1.1.npz"))  # 참여업체수
             print("✅ 머신러닝 모델들 로드 완료")
             
         except Exception as e:
@@ -234,13 +279,32 @@ class SampleDataPredictor():
         data.columns = data.columns.str.strip()
         print(f"정리된 컬럼: {list(data.columns)}")
         
-        # 필요한 컬럼들 정의
-        required_columns = ['기초금액', '낙찰하한률', '참여업체수',
-                           '간접비', '순공사원가', 
-                           '면허제한코드', '공고기관코드',
-                           '공고기관명', '공고기관점수',
-                           '공사지역', '공사지역점수',
-                           '키워드', '키워드점수']
+        # 입찰 유형에 따른 설정 확인
+        if self.bid_type == 'cst':
+            self.is_construction = True
+            print("🏗️  입찰 유형: 공사입찰")
+        else:
+            self.is_construction = False
+            if self.bid_type == 'gdns':
+                print("🔧 입찰 유형: 용역입찰")
+            elif self.bid_type == 'mtrl':
+                print("🛒 입찰 유형: 구매입찰")
+        
+        # 기본 컬럼 정의
+        base_columns = ['기초금액', '낙찰하한률', '참여업체수',
+                       '면허제한코드', '공고기관코드',
+                       '공고기관명', '공고기관점수',
+                       '공사지역', '공사지역점수',
+                       '키워드', '키워드점수']
+        
+        # 공사입찰 전용 컬럼
+        construction_columns = ['간접비', '순공사원가']
+        
+        # 입찰 유형에 따라 필요한 컬럼 결정
+        if self.is_construction:
+            required_columns = base_columns + construction_columns
+        else:
+            required_columns = base_columns
         
         # 존재하는 컬럼만 선택
         available_columns = [col for col in required_columns if col in data.columns]
@@ -263,11 +327,32 @@ class SampleDataPredictor():
                 dataset_x[col] = ''
             elif col == '참여업체수':
                 dataset_x[col] = 5  # 기본값으로 5 설정
+            elif col in construction_columns:
+                # 간접비, 순공사원가는 0으로 설정
+                dataset_x[col] = 0
             else:
                 dataset_x[col] = 0
         
-        # 컬럼 순서 정렬
-        dataset_x = dataset_x[required_columns]
+        # 컬럼 순서 정리
+        if self.is_construction:
+            # 공사입찰: 간접비, 순공사원가 포함
+            ordered_columns = ['기초금액', '낙찰하한률', '참여업체수',
+                             '간접비', '순공사원가',
+                             '면허제한코드', '공고기관코드',
+                             '공고기관명', '공고기관점수',
+                             '공사지역', '공사지역점수',
+                             '키워드', '키워드점수']
+        else:
+            # 용역입찰: 간접비, 순공사원가 제외
+            ordered_columns = ['기초금액', '낙찰하한률', '참여업체수',
+                             '면허제한코드', '공고기관코드',
+                             '공고기관명', '공고기관점수',
+                             '공사지역', '공사지역점수',
+                             '키워드', '키워드점수']
+        
+        # 존재하는 컬럼만 선택하여 순서 맞추기
+        ordered_columns = [col for col in ordered_columns if col in dataset_x.columns]
+        dataset_x = dataset_x[ordered_columns]
         
         # 텍스트 컬럼들을 문자열로 변환
         print("📝 텍스트 데이터 전처리 중...")
@@ -312,17 +397,30 @@ class SampleDataPredictor():
         print("🔮 예측 수행 중...")
         print("="*80)
         
-        # 필요한 컬럼만 선택 (훈련 시 사용한 특성과 동일하게)
-        # 훈련 시 사용한 특성: [0,1,2,7,8,13,17,19,21] = 기초금액, 낙찰하한률, 참여업체수, 간접비, 순공사원가, 면허제한코드, 공고기관점수, 공사지역점수, 키워드점수
-        feature_columns = ['기초금액', '낙찰하한률', '참여업체수', '간접비', '순공사원가', 
-                          '면허제한코드', '공고기관점수', '공사지역점수', '키워드점수']
+        # 입찰 유형에 따라 특성 컬럼 결정
+        if self.is_construction:
+            # 공사입찰: 간접비, 순공사원가 포함
+            feature_columns = ['기초금액', '낙찰하한률', '참여업체수', '간접비', '순공사원가', 
+                              '면허제한코드', '공고기관점수', '공사지역점수', '키워드점수']
+        else:
+            # 용역입찰: 간접비, 순공사원가 제외
+            feature_columns = ['기초금액', '낙찰하한률', '참여업체수', 
+                              '면허제한코드', '공고기관점수', '공사지역점수', '키워드점수']
         
         # 존재하는 컬럼만 선택
         available_feature_columns = [col for col in feature_columns if col in dataset_x.columns]
-        selected_columns = dataset_x[available_feature_columns]
+        selected_columns = dataset_x[available_feature_columns].copy()
         
         print(f"선택된 특성 컬럼: {available_feature_columns}")
         print(f"선택된 컬럼 수: {len(available_feature_columns)}")
+        
+        # # 간접비, 순공사원가가 없으면 기본값 0으로 추가 (스케일러 호환성)
+        # if not self.is_construction:
+        #     # 용역입찰인 경우 스케일러가 공사입찰 형태를 기대한다면 추가
+        #     if '간접비' not in selected_columns.columns:
+        #         selected_columns.insert(3, '간접비', 0)
+        #     if '순공사원가' not in selected_columns.columns:
+        #         selected_columns.insert(4, '순공사원가', 0)
         
         # 데이터 검증
         print("🔍 데이터 검증 중...")
@@ -372,8 +470,9 @@ class SampleDataPredictor():
         result_df = dataset_x.copy()
         
         # 입찰번호와 입찰차수를 원본 데이터에서 가져와서 제일 앞에 추가
-        # TODO : 아래는 예측대상파일
-        original_data = pd.read_csv(self.data_dir + "/cst/result_cst_rst_y.csv")
+        # 전역 패턴을 사용하여 최신 파일을 선택
+        original_file_rel = resolve_latest_result_csv(self.bid_type, self.data_dir)
+        original_data = pd.read_csv(self.data_dir + original_file_rel)
         original_data.columns = original_data.columns.str.strip()  # 컬럼명 공백 제거
         
         if '입찰번호' in original_data.columns:
@@ -396,18 +495,31 @@ class SampleDataPredictor():
         # 낙찰하한금액 = 기초금액 × 낙찰하한률
         result_df['낙찰하한금액'] = result_df['기초금액'] * result_df['낙찰하한률']
         
-        # A계산여부: 간접비가 0원이 아닐 경우 O, 0원일 경우 X
-        result_df['A계산여부'] = result_df['간접비'].apply(lambda x: 'O' if x != 0 else 'X')
+        # A계산여부 처리
+        if self.is_construction:
+            # 공사입찰: 간접비가 0원이 아닐 경우 O, 0원일 경우 X
+            if '간접비' in result_df.columns:
+                result_df['A계산여부'] = result_df['간접비'].apply(lambda x: 'O' if x != 0 else 'X')
+            else:
+                result_df['A계산여부'] = ''
+        else:
+            # 용역입찰: A계산 없음
+            result_df['A계산여부'] = ''
         
         # 새로 추가된 컬럼들에 기본값 설정
         result_df['기초금액률'] = 0.0  # 기본값
-        result_df['순공사원가적용여부'] = '0'  # 기본값
-        result_df['주공종명'] = ''  # 기본값
-        result_df['공고일자'] = None  # 기본값
-        result_df['개찰일시'] = None  # 기본값
+        if '순공사원가적용여부' not in result_df.columns:
+            result_df['순공사원가적용여부'] = '0'  # 기본값
+        if '주공종명' not in result_df.columns:
+            result_df['주공종명'] = ''  # 기본값
+        if '공고일자' not in result_df.columns:
+            result_df['공고일자'] = None  # 기본값
+        if '개찰일시' not in result_df.columns:
+            result_df['개찰일시'] = None  # 기본값
         result_df['예측_URL'] = f"sample_prediction_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"  # 기본값
         
         print("✅ 예측 완료")
+        print(f"   - 입찰 유형: {self.bid_type_name}")
         print(f"   - 업체투찰률 예측 범위: {pred1.min():.3f} ~ {pred1.max():.3f}")
         print(f"   - 예가투찰률 예측 범위: {pred2.min():.3f} ~ {pred2.max():.3f}")
         print(f"   - 참여업체수 예측 범위: {pred3.min():.1f} ~ {pred3.max():.1f}")
@@ -419,7 +531,7 @@ class SampleDataPredictor():
         
         return result_df
     
-    def save_predictions(self, result_df, output_file, save_to_db=True, model_version="v0.1.1", insert_mode="REPLACE"):
+    def save_predictions(self, result_df, output_file, save_to_db=True, model_version="v0.1.1", insert_mode="IGNORE"):
         """예측 결과를 엑셀 파일과 데이터베이스에 저장"""
         print("="*80)
         print("💾 예측 결과 저장 중...")
@@ -438,7 +550,7 @@ class SampleDataPredictor():
         """엑셀 파일로 저장"""
         try:
             # 결과 저장 디렉토리 생성
-            result_dir = os.path.join(self.save_dir, "predict_result")
+            result_dir = os.path.join(self.cur_dir, "predict_result")
             os.makedirs(result_dir, exist_ok=True)
             
             output_path = os.path.join(result_dir, output_file)
@@ -469,7 +581,7 @@ class SampleDataPredictor():
                            encoding='utf-8-sig')
             print(f"✅ CSV 파일로 저장 완료: {csv_path}")
     
-    def _save_to_database(self, result_df, model_version, insert_mode="REPLACE"):
+    def _save_to_database(self, result_df, model_version, insert_mode="IGNORE"):
         """데이터베이스에 저장"""
         try:
             print("🗄️  데이터베이스에 저장 중...")
@@ -509,9 +621,75 @@ class SampleDataPredictor():
             print(f"❌ 데이터베이스 저장 실패: {e}")
             print("엑셀 파일은 정상적으로 저장되었습니다.")
 
+    def _reload_models(self):
+        """모델 경로가 변경된 경우 모델을 다시 로드"""
+        print("🔄 모델 재로드 중...")
+        try:
+            # 1. 형태소 분석기 로드
+            print("📚 형태소 분석기 재로드 중...")
+            self.tokenizer = KiwiTokenizer("mlpregr.tokenizer.v0.1.1.npz")
+            self.tokenizer.save_dir = self.model_dir
+            self.tokenizer.loadDictonary('표준국어대사전.NNP.csv')
+            print("✅ 형태소 분석기 재로드 완료")
+            
+            # 2. TF-IDF 벡터화기 로드
+            print("🔤 TF-IDF 벡터화기 재로드 중...")
+            self.vectorizer = KiwiVectorizer()
+            self.vectorizer.save_dir = self.model_dir
+            self.vectorizer.load("mlpregr.vectorizer.v0.1.1.npz")
+            print("✅ TF-IDF 벡터화기 재로드 완료")
+            
+            # 3. 정규화 도구 로드
+            print("📊 정규화 도구 재로드 중...")
+            self.scaler = joblib.load(os.path.join(self.model_dir, "x_fited_scaler.v2.npz"))
+            print("✅ 정규화 도구 재로드 완료")
+            
+            # 4. 머신러닝 모델들 로드
+            print("🤖 머신러닝 모델들 재로드 중...")
+            self.model1 = joblib.load(os.path.join(self.model_dir, "mlpregr.model1.v0.1.1.npz"))
+            self.model2 = joblib.load(os.path.join(self.model_dir, "mlpregr.model2.v0.1.1.npz"))
+            self.model3 = joblib.load(os.path.join(self.model_dir, "mlpregr.model3.v0.1.1.npz"))
+            print("✅ 머신러닝 모델들 재로드 완료")
+            
+        except Exception as e:
+            print(f"❌ 모델 재로드 실패: {e}")
+            raise e
+
 def main():
     """메인 실행 함수"""
-    data_file = "/cst/result_cst_rst_y.csv"
+    import sys
+    
+    # 커맨드라인 인자로 입찰 유형 선택 (필수)
+    if len(sys.argv) < 2:
+        print("❌ 오류: bid_type 인자가 필요합니다.")
+        print("사용법: python predict_sample_data.py [cst|gdns|mtrl]")
+        print("  - cst: 공사입찰")
+        print("  - gdns: 용역입찰")
+        print("  - mtrl: 구매입찰")
+        sys.exit(1)
+    
+    bid_type = sys.argv[1].lower()
+    
+    # bid_type 유효성 검사
+    valid_bid_types = ['cst', 'gdns', 'mtrl']
+    if bid_type not in valid_bid_types:
+        print(f"❌ 오류: bid_type은 반드시 {valid_bid_types} 중 하나여야 합니다.")
+        print(f"현재 값: {bid_type}")
+        sys.exit(1)
+    
+    # 입찰 유형에 따른 설정
+    if bid_type == 'cst':
+        data_file = resolve_latest_result_csv('cst', os.getcwd() + '\\data\\')
+        table_name = 'ML_CST_RSLT_N'
+        bid_type_name = "공사입찰"
+    elif bid_type == 'gdns':
+        data_file = resolve_latest_result_csv('gdns', os.getcwd() + '\\data\\')
+        table_name = 'ML_GDNS_RSLT_N'
+        bid_type_name = "용역입찰"
+    elif bid_type == 'mtrl':
+        data_file = resolve_latest_result_csv('mtrl', os.getcwd() + '\\data\\')
+        table_name = 'ML_MTRL_RSLT_N'
+        bid_type_name = "구매입찰"
     
     # SQL Server 연결 설정
     db_config = {
@@ -524,11 +702,11 @@ def main():
     
     try:
         print("="*80)
-        print("🎯 샘플 데이터 예측 시작")
+        print(f"🎯 예측 시작 - 입찰유형: {bid_type_name}")
         print("="*80)
         
-        # 예측기 생성 (SQL Server 사용, 테이블명 ML_CST_RSLT_Y)
-        predictor = SampleDataPredictor(use_sql_server=True, db_config=db_config, table_name='ML_CST_RSLT_Y')
+        # 예측기 생성 (입찰 유형 지정)
+        predictor = SampleDataPredictor(bid_type=bid_type, use_sql_server=True, db_config=db_config, table_name=table_name)
         
         # 데이터 전처리
         processed_data = predictor.preprocess_data(data_file)
@@ -537,14 +715,15 @@ def main():
         predictions = predictor.predict_data(processed_data)
         
         # 결과 저장 (엑셀 파일 + SQL Server 데이터베이스)
-        output_file = f"sample_prediction_result_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        output_file = f"{bid_type_name}_prediction_result_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         predictor.save_predictions(predictions, output_file, save_to_db=True, model_version="v0.1.1")
         
         print("="*80)
         print("🎉 예측 프로세스 완료!")
         print(f"📁 결과 파일: res/predict_result/{output_file}")
         print(f"🗄️  데이터베이스: SQL Server (192.168.0.218:1433/bips)")
-        print(f"📊 테이블명: ML_CST_RSLT_Y")
+        print(f"📊 테이블명: {table_name}")
+        print(f"🏷️  입찰 유형: {bid_type_name}")
         print("="*80)
         
         # 예측 결과 요약 출력
@@ -553,7 +732,8 @@ def main():
         print(f"업체투찰률 평균: {predictions['업체투찰률_예측'].mean():.3f}")
         print(f"예가투찰률 평균: {predictions['예가투찰률_예측'].mean():.3f}")
         print(f"참여업체수 평균: {predictions['참여업체수_예측'].mean():.1f}")
-        print(f"A계산 여부: {predictions['A계산여부'].value_counts().to_dict()}")
+        if 'A계산여부' in predictions.columns:
+            print(f"A계산 여부: {predictions['A계산여부'].value_counts().to_dict()}")
         
     except Exception as e:
         print(f"❌ 오류 발생: {e}")
