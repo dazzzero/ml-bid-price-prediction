@@ -191,11 +191,14 @@ class SampleDataPredictor():
             self.model_dir = self.cur_dir + '\\res\\model\\gdns\\'
             self.bid_type_name = '용역입찰'
         elif bid_type == 'mtrl':
-            self.model_dir = self.cur_dir + '\\res\\model\\mtrl\\'
+            # 물품입찰(mtrl)은 용역(gdns) 모델을 사용
+            self.model_dir = self.cur_dir + '\\res\\model\\gdns\\'
             self.bid_type_name = '구매입찰'
         
         print(f"📂 모델 경로: {self.model_dir}")
         print(f"🏷️  입찰 유형: {self.bid_type_name}")
+        if bid_type == 'mtrl':
+            print("⚠️  참고: 물품입찰 데이터이지만 용역(gdns) 모델을 사용합니다.")
         
         # 모델 로드
         self.load_models_and_preprocessors()
